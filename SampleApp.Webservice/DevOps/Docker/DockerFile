@@ -1,0 +1,10 @@
+FROM 723078827062.dkr.ecr.us-east-1.amazonaws.com/coi-base-images:openjdk-jre-11
+
+ARG VERSION
+ENV APP_VERSION=$VERSION
+
+WORKDIR app
+COPY SampleApp.Cli/target/sample-app.cli-$APP_VERSION.jar .
+
+ENTRYPOINT java -jar ./sample-app.cli-$APP_VERSION.jar
+

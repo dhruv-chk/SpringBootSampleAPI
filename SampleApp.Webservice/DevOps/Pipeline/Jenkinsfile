@@ -1,0 +1,88 @@
+String AGENT_IMAGE = 'maven:3-openjdk-11'
+
+String getVersion() {
+    return sh (
+        script: 'python ./SampleApp.Webservice/DevOps/Scripts/get_version.py',
+        returnStdout: true
+    ).trim()
+}
+
+String getAwsRegion() {
+    return "us-east-1"
+}
+
+String getAWSAccountID() {
+    return "1234567890"
+}
+
+pipeline {
+    agent {
+        dockerfile {
+            filename './SampleApp.Webservice/DevOps/Pipeline/Dockerfile'
+            args '--privileged -v /var/run/docker.sock:/var/run/docker.sock -v /home/ec2-user/.docker:/.docker'
+            reuseNode true
+        }
+    }
+    parameters {
+        choice(name: 'ENVIRONMENT', choices: ['dev', 'qa', 'demo', 'prod'], description: 'The build/deployment environment')
+    }
+
+    environment {
+        ENVIRONMENT="${params.ENVIRONMENT}"
+        AWS_DEFAULT_REGION = "us-east-1"
+        AWS_ACCOUNT_ID = "1234567890"
+        ECR_REPO = "org-${ENVIRONMENT}-api"
+        IMAGE_TAG = "${getVersion()}"
+        CERTIFICATE = "arn:aws:acm:${AWS_DEFAULT_REGION}:${AWS_ACCOUNT_ID}:certificate/rqqeqe131413qrasrsrsf"
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                sh """
+                echo Build started on `date`
+                echo Building the JAR...
+                mvn clean
+                mvn install
+                aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+                echo Building the Docker image...    
+                docker build -f ./SampleApp.Webservice/DevOps/Docker/DockerFile --build-arg AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID} --build-arg AWS_REGION=${AWS_DEFAULT_REGION} --build-arg VERSION=${IMAGE_TAG} -t $ECR_REPO:${IMAGE_TAG} .
+                docker tag ${ECR_REPO}:${IMAGE_TAG} ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}
+                echo Build completed on `date`
+                echo Pushing the Docker image...
+                docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}
+                """
+            }
+        }
+        
+        stage('Deploy') {
+            steps {
+                sh """
+                chmod +x ./SampleApp.Webservice/DevOps/Scripts/*
+                echo Deploying StateHandler.Lambda...
+                ./SampleApp.Webservice/DevOps/Scripts/deploy_cf_stack.sh \
+                    SampleApp.Webservice/DevOps/AWS \
+                    ECSService \
+                   org-${ENVIRONMENT}-api \
+                    "ProjectPrefix=org-api Environment=${ENVIRONMENT} ECRRepoUri=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG} PublicSubnet1Id=/org/${ENVIRONMENT}/public-subnet-1-id PublicSubnet2Id=/org/${ENVIRONMENT}/public-subnet-2-id VpcId=/org/${ENVIRONMENT}/vpc-id orgCertificate=${CERTIFICATE} ELBCanonicalHostedZoneId=/org/${ENVIRONMENT}/elb/shared-elb-canonical-hosted-zone-id HostedZoneId=/org/hosted-zone-id ELBDNSName=/org/${ENVIRONMENT}/elb/shared-elb-dns-name ELBListenerArn=/org/${ENVIRONMENT}/elb/shared-elb-listener-arn ELBSecurityGroupId=/org/${ENVIRONMENT}/elb/shared-elb-security-group-id" \
+                    "Environment=${ENVIRONMENT} Contact=user@random.com" \
+                    org-cf-deploy-bucket
+                """
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Successfully updated API'
+        }
+
+        failure {
+            echo 'Failed to update API'
+        }
+
+        aborted {
+            echo 'Aborted API update'
+        }
+    }
+}
